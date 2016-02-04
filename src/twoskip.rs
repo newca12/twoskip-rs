@@ -270,7 +270,7 @@ impl Db {
     }
 
     let mut next_loc: Vec<usize> = vec!();
-    for i in 0..level+1 {
+    for _ in 0..level+1 {
       next_loc.push(BigEndian::read_u64(unsafe { slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u64>()) }) as usize);
       next += mem::size_of::<u64>();
     }
@@ -306,9 +306,14 @@ impl Db {
 }
 
 impl<'a> Record<'a> {
-  fn key(&self) -> &[u8] {
+  pub fn key(&self) -> &[u8] {
     let base: *mut u8 = self.db.map.data();
     unsafe { slice::from_raw_parts(base.offset(self.key_offset as isize), self.key_len) }
+  }
+
+  pub fn value(&self) -> &[u8] {
+    let base: *mut u8 = self.db.map.data();
+    unsafe { slice::from_raw_parts(base.offset(self.val_offset as isize), self.val_len) }
   }
 
   fn format_data_record(&self, name: &str) -> String {
