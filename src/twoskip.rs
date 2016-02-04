@@ -226,8 +226,8 @@ impl Db {
     let mut offset = START_OFFSET;
     while offset < self.header.current_size {
       let r = try!(self.record_at(offset));
-      offset += r.len;
       println!("{:08x} {}", offset, r.dump());
+      offset += r.len;
     }
 
     Ok(())
