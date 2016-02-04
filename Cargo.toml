@@ -1,0 +1,10 @@
+[package]
+name = "twoskip"
+version = "0.1.0"
+authors = ["Rob N ★ <robn@robn.io>"]
+license = "MIT"
+
+[dependencies]
+mmap = "*"
+byteorder = "*"
+crc = "*"
