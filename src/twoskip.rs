@@ -8,6 +8,7 @@ use std::slice;
 use std::mem;
 use std::ops::{Add,Sub,Rem};
 use std::str;
+use std::cmp::Ordering;
 use num::Zero;
 use mmap;
 use mmap::{MemoryMap, MapOption};
@@ -35,7 +36,7 @@ impl From<u8> for RecordType {
   }
 }
 
-struct Record<'a> {
+pub struct Record<'a> {
   db:         &'a Db,
   offset:     usize,
   len:        usize,
@@ -214,6 +215,42 @@ fn round_up<T>(n: T, to: T) -> T where T: Add<Output=T> + Sub<Output=T> + Rem<Ou
 }
 
 impl Db {
+  pub fn get(&self, key: &[u8]) -> Result<Option<Record>,Error> {
+    let mut r = try!(self.record_at(START_OFFSET));
+    let mut level = r.level;
+
+    loop {
+      println!("loop iter level {}", level);
+
+      let mut offset = 0;
+      while offset == 0 && level > 0 {
+        offset = r.next_loc[level as usize];
+        if offset == 0 { level = level - 1 };
+      }
+      if level == 0 || offset == 0 {
+        return Ok(None);
+      }
+
+      let next = try!(self.record_at(offset));
+
+      println!("next key {:?}", next.key());
+
+      match key.cmp(next.key()) {
+        Ordering::Equal => return Ok(Some(next)),
+        Ordering::Less  => {
+          level = level - 1;
+          if level == 0 {
+            return Ok(None);
+          }
+        },
+        Ordering::Greater => {
+          r = next;
+          level = r.level;
+        },
+      };
+    }
+  }
+
   pub fn dump(&self) -> Result<(),Error> {
     println!("HEADER: v={version} fl={flags:x} num={num_records} sz={current_size:08x}/{repack_size:08x}",
       version      = self.header.version,
@@ -233,7 +270,7 @@ impl Db {
     Ok(())
   }
 
-  fn record_at<'a>(&'a self, offset: usize) -> Result<Record,Error> {
+  fn record_at(&self, offset: usize) -> Result<Record,Error> {
     let base: *mut u8 = self.map.data();
 
     let mut next = offset;
