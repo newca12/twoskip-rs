@@ -1,11 +1,13 @@
 [package]
 name = "twoskip"
 version = "0.1.0"
-authors = ["Rob N ★ <robn@robn.io>"]
+edition = "2021"
+authors = ["Rob N ★ <robn@despairlabs.com>"]
 license = "MIT"
+repository = "https://github.com/robn/twoskip-rs"
 
 [dependencies]
-mmap = "*"
-byteorder = "*"
-crc = "*"
-num = "*"
+mmap = "0.1"
+byteorder = "1.4"
+crc = "3.0"
+num = "0.4"
