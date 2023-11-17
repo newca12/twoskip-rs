@@ -1,7 +1,6 @@
 use byteorder::{BigEndian, ByteOrder};
 use crc::Crc;
-use mmap;
-use mmap::{MapOption, MemoryMap};
+use memmap2::Mmap;
 use num::Zero;
 use std::cmp::Ordering;
 use std::error::Error as StdError;
@@ -18,6 +17,7 @@ const CRC32: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
 
 const MAX_LEVEL: u8 = 31;
 
+#[derive(Debug)]
 enum RecordType {
     Dummy,
     Record,
@@ -37,6 +37,7 @@ impl From<u8> for RecordType {
     }
 }
 
+#[derive(Debug)]
 pub struct Record<'a> {
     db: &'a Db,
     offset: usize,
@@ -64,7 +65,7 @@ struct Location {
 }
 */
 
-const HEADER_MAGIC: &'static [u8; 20] = b"\xa1\x02\x8b\x0dtwoskip file\x00\x00\x00\x00";
+const HEADER_MAGIC: &[u8; 20] = b"\xa1\x02\x8b\x0dtwoskip file\x00\x00\x00\x00";
 const HEADER_SIZE: usize = 64;
 
 const HEADER_VERSION: u32 = 1;
@@ -80,6 +81,9 @@ const OFFSET_CRC32: usize = 60;
 
 const START_OFFSET: usize = HEADER_SIZE;
 
+const BLANK: &[u8; 8] = b" BLANK\x07\xa0";
+
+#[derive(Debug)]
 struct Header {
     version: u32,
     flags: u32, // XXX bitflags
@@ -91,8 +95,9 @@ struct Header {
 
 type Txn = usize;
 
+#[derive(Debug)]
 pub struct Db {
-    map: MemoryMap,
+    map: Mmap,
     header: Header,
     /*
       loc:          Location,
@@ -132,8 +137,7 @@ impl fmt::Display for Error {
             f,
             "{}",
             match *self {
-                Error::InternalError(ref err) =>
-                    format!("{} ({})", self.to_string(), err.to_string()),
+                Error::InternalError(ref err) => format!("{:?} ({})", self, err),
                 ref e => e.to_string(),
             }
         )
@@ -146,73 +150,54 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<mmap::MapError> for Error {
-    fn from(err: mmap::MapError) -> Error {
-        Error::InternalError(Box::new(err))
-    }
-}
-
-fn read_header(map: &MemoryMap) -> Result<Header, Error> {
+fn read_header(map: &Mmap) -> Result<Header, Error> {
     if map.len() < HEADER_SIZE {
         return Err(Error::InvalidFileSize);
     }
 
-    let base = map.data();
+    let base = map.as_ptr(); //. .data();
 
-    let magic =
-        unsafe { slice::from_raw_parts(base.offset(OFFSET_HEADER as isize), HEADER_MAGIC.len()) };
+    let magic = unsafe { slice::from_raw_parts(base.add(OFFSET_HEADER), HEADER_MAGIC.len()) };
     if magic != HEADER_MAGIC {
         return Err(Error::InvalidHeaderMagic);
     }
 
     let version = BigEndian::read_u32(unsafe {
-        slice::from_raw_parts(base.offset(OFFSET_VERSION as isize), mem::size_of::<u32>())
+        slice::from_raw_parts(base.add(OFFSET_VERSION), mem::size_of::<u32>())
     });
     if version != HEADER_VERSION {
         return Err(Error::VersionMismatch);
     }
 
     let generation = BigEndian::read_u64(unsafe {
-        slice::from_raw_parts(
-            base.offset(OFFSET_GENERATION as isize),
-            mem::size_of::<u64>(),
-        )
+        slice::from_raw_parts(base.add(OFFSET_GENERATION), mem::size_of::<u64>())
     });
     let num_records = BigEndian::read_u64(unsafe {
-        slice::from_raw_parts(
-            base.offset(OFFSET_NUM_RECORDS as isize),
-            mem::size_of::<u64>(),
-        )
+        slice::from_raw_parts(base.add(OFFSET_NUM_RECORDS), mem::size_of::<u64>())
     });
     let repack_size = BigEndian::read_u64(unsafe {
-        slice::from_raw_parts(
-            base.offset(OFFSET_REPACK_SIZE as isize),
-            mem::size_of::<u64>(),
-        )
+        slice::from_raw_parts(base.add(OFFSET_REPACK_SIZE), mem::size_of::<u64>())
     }) as usize;
     let current_size = BigEndian::read_u64(unsafe {
-        slice::from_raw_parts(
-            base.offset(OFFSET_CURRENT_SIZE as isize),
-            mem::size_of::<u64>(),
-        )
+        slice::from_raw_parts(base.add(OFFSET_CURRENT_SIZE), mem::size_of::<u64>())
     }) as usize;
 
     // XXX flags
 
     let crc = BigEndian::read_u32(unsafe {
-        slice::from_raw_parts(base.offset(OFFSET_CRC32 as isize), mem::size_of::<u32>())
+        slice::from_raw_parts(base.add(OFFSET_CRC32), mem::size_of::<u32>())
     });
-    if crc != CRC32.checksum(unsafe { slice::from_raw_parts(base, OFFSET_CRC32 as usize) }) {
+    if crc != CRC32.checksum(unsafe { slice::from_raw_parts(base, OFFSET_CRC32) }) {
         return Err(Error::ChecksumMismatch);
     }
 
     let header = Header {
-        version: version,
+        version,
         flags: 0,
-        generation: generation,
-        num_records: num_records,
-        repack_size: repack_size,
-        current_size: current_size,
+        generation,
+        num_records,
+        repack_size,
+        current_size,
     };
 
     Ok(header)
@@ -220,19 +205,12 @@ fn read_header(map: &MemoryMap) -> Result<Header, Error> {
 
 pub fn open<P: AsRef<Path>>(path: P) -> Result<Db, Error> {
     let f = File::open(path)?;
-
-    let md = f.metadata()?;
-    let len = md.len() as usize;
     let fd = f.into_raw_fd();
 
-    let map = MemoryMap::new(len, &[MapOption::MapReadable, MapOption::MapFd(fd)])?;
-
+    let map = unsafe { Mmap::map(fd)? };
     let header = read_header(&map)?;
 
-    let db = Db {
-        map: map,
-        header: header,
-    };
+    let db = Db { map, header };
 
     Ok(db)
 }
@@ -260,7 +238,7 @@ impl Db {
             while offset == 0 && level > 0 {
                 offset = r.next_loc[level as usize];
                 if offset == 0 {
-                    level = level - 1
+                    level -= 1
                 };
             }
             if level == 0 || offset == 0 {
@@ -274,7 +252,7 @@ impl Db {
             match key.cmp(next.key()) {
                 Ordering::Equal => return Ok(Some(next)),
                 Ordering::Less => {
-                    level = level - 1;
+                    level -= 1;
                     if level == 0 {
                         return Ok(None);
                     }
@@ -288,7 +266,7 @@ impl Db {
     }
 
     pub fn dump(&self) -> Result<(), Error> {
-        println!("HEADER: v={version} fl={flags:x} num={num_records} sz={current_size:08x}/{repack_size:08x}",
+        println!("HEADER: v={version} fl={flags:x} num={num_records} sz=({current_size:08X}/{repack_size:08X})",
       version      = self.header.version,
       flags        = self.header.flags,
       num_records  = self.header.num_records,
@@ -298,48 +276,55 @@ impl Db {
 
         let mut offset = START_OFFSET;
         while offset < self.header.current_size {
-            let r = self.record_at(offset)?;
-            println!("{:08x} {}", offset, r.dump());
-            offset += r.len;
+            let maybe_blank =
+                unsafe { slice::from_raw_parts(self.map.as_ptr().add(offset), BLANK.len()) };
+            if maybe_blank == BLANK {
+                println!("{:08X} BLANK", offset);
+                offset += 8;
+            } else {
+                let r = self.record_at(offset)?;
+                println!("{:08X} {}", offset, r.dump());
+                offset += r.len;
+            }
         }
 
         Ok(())
     }
 
     fn record_at(&self, offset: usize) -> Result<Record, Error> {
-        let base: *mut u8 = self.map.data();
+        let base = self.map.as_ptr();
 
         let mut next = offset;
 
         // XXX consts or sizeofs or whatever through here
 
-        let raw_type = unsafe { *(base.offset(next as isize)) };
+        let raw_type = unsafe { *(base.add(next)) };
         next += 1;
-        let level = unsafe { *(base.offset(next as isize)) };
+        let level = unsafe { *(base.add(next)) };
         next += 1;
         if level > MAX_LEVEL {
             return Err(Error::InvalidLevel);
         }
 
         let mut key_len = BigEndian::read_u16(unsafe {
-            slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u16>())
+            slice::from_raw_parts(base.add(next), mem::size_of::<u16>())
         }) as usize;
         next += mem::size_of::<u16>();
         let mut val_len = BigEndian::read_u32(unsafe {
-            slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u32>())
+            slice::from_raw_parts(base.add(next), mem::size_of::<u32>())
         }) as usize;
         next += mem::size_of::<u32>();
 
         if key_len == u16::max_value() as usize {
             key_len = BigEndian::read_u64(unsafe {
-                slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u64>())
+                slice::from_raw_parts(base.add(next), mem::size_of::<u64>())
             }) as usize;
             next += mem::size_of::<u64>();
         }
 
         if val_len == u32::max_value() as usize {
             val_len = BigEndian::read_u64(unsafe {
-                slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u64>())
+                slice::from_raw_parts(base.add(next), mem::size_of::<u64>())
             }) as usize;
             next += mem::size_of::<u64>();
         }
@@ -356,25 +341,23 @@ impl Db {
         let mut next_loc: Vec<usize> = vec![];
         for _ in 0..level + 1 {
             next_loc.push(BigEndian::read_u64(unsafe {
-                slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u64>())
+                slice::from_raw_parts(base.add(next), mem::size_of::<u64>())
             }) as usize);
             next += mem::size_of::<u64>();
         }
 
         let crc32_head = BigEndian::read_u32(unsafe {
-            slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u32>())
+            slice::from_raw_parts(base.add(next), mem::size_of::<u32>())
         });
         if crc32_head
-            != CRC32.checksum(unsafe {
-                slice::from_raw_parts(base.offset(offset as isize), next - offset)
-            })
+            != CRC32.checksum(unsafe { slice::from_raw_parts(base.add(offset), next - offset) })
         {
             return Err(Error::ChecksumMismatch);
         }
         next += mem::size_of::<u32>();
 
         let crc32_tail = BigEndian::read_u32(unsafe {
-            slice::from_raw_parts(base.offset(next as isize), mem::size_of::<u32>())
+            slice::from_raw_parts(base.add(next), mem::size_of::<u32>())
         });
         next += mem::size_of::<u32>();
 
@@ -383,17 +366,17 @@ impl Db {
 
         let r = Record {
             db: self,
-            offset: offset,
-            len: len,
+            offset,
+            len,
             typ: RecordType::from(raw_type),
-            level: level,
-            key_len: key_len,
-            val_len: val_len,
-            next_loc: next_loc,
-            crc32_head: crc32_head,
-            crc32_tail: crc32_tail,
-            key_offset: key_offset,
-            val_offset: val_offset,
+            level,
+            key_len,
+            val_len,
+            next_loc,
+            crc32_head,
+            crc32_tail,
+            key_offset,
+            val_offset,
         };
 
         Ok(r)
@@ -402,39 +385,38 @@ impl Db {
 
 impl<'a> Record<'a> {
     pub fn key(&self) -> &[u8] {
-        let base: *mut u8 = self.db.map.data();
-        unsafe { slice::from_raw_parts(base.offset(self.key_offset as isize), self.key_len) }
+        let base = self.db.map.as_ptr();
+        unsafe { slice::from_raw_parts(base.add(self.key_offset), self.key_len) }
     }
 
     pub fn value(&self) -> &[u8] {
-        let base: *mut u8 = self.db.map.data();
-        unsafe { slice::from_raw_parts(base.offset(self.val_offset as isize), self.val_len) }
+        let base = self.db.map.as_ptr();
+        unsafe { slice::from_raw_parts(base.add(self.val_offset), self.val_len) }
     }
 
     fn format_data_record(&self, name: &str) -> String {
         format!(
-            "{name} kl={key_len:08x} dl={val_len:08x} lvl={level} ({key})\n    {next_loc}",
+            "{name} kl={key_len} dl={val_len} lvl={level} ({key})\n\t{next_loc}",
             name = name,
             key_len = self.key_len,
             val_len = self.val_len,
             level = self.level,
-            key = match std::str::from_utf8(self.key()) {
-                Ok(s) => s,
-                Err(_) => "[Utf8Error]",
-            },
+            key = std::str::from_utf8(self.key()).unwrap_or("[Utf8Error]"),
             next_loc = self.format_next_loc(),
         )
     }
 
     fn format_next_loc(&self) -> String {
-        (0..self.level + 1)
+        let first = format!("{:08X}", self.next_loc[0]);
+        let next = (1..self.level + 1)
             .map(|l| self.next_loc[l as usize])
-            .map(|loc| format!("{:08x}", loc))
+            .map(|loc| format!("{:08X}", loc))
             .collect::<Vec<String>>()
             .chunks(8)
             .map(|v| v.join(" "))
             .collect::<Vec<String>>()
-            .join("\n    ")
+            .join(" \n\t");
+        format!("{first} \n\t{next} ")
     }
 
     pub fn dump(&self) -> String {
