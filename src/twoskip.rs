@@ -18,7 +18,7 @@ const CRC32: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
 const MAX_LEVEL: u8 = 31;
 
 #[derive(Debug)]
-enum RecordType {
+pub enum RecordType {
     Dummy,
     Record,
     Delete,
@@ -42,7 +42,7 @@ pub struct Record<'a> {
     db: &'a Db,
     offset: usize,
     len: usize,
-    typ: RecordType,
+    pub typ: RecordType,
     level: u8,
     key_len: usize,
     val_len: usize,
@@ -106,6 +106,11 @@ pub struct Db {
       next_txn_num: usize,
       current_txn:  Txn,
     */
+}
+
+pub struct DbIter<'a> {
+    db: &'a Db,
+    offset: usize,
 }
 
 #[derive(Debug)]
@@ -381,6 +386,13 @@ impl Db {
 
         Ok(r)
     }
+
+    pub fn iter(&self) -> DbIter<'_> {
+        DbIter {
+            db: self,
+            offset: START_OFFSET,
+        }
+    }
 }
 
 impl<'a> Record<'a> {
@@ -431,6 +443,28 @@ impl<'a> Record<'a> {
             RecordType::Commit => {
                 format!("COMMIT start={next_loc:08x}", next_loc = self.next_loc[0],)
             }
+        }
+    }
+}
+
+impl<'a> Iterator for DbIter<'a> {
+    type Item = Record<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset < self.db.header.current_size {
+            let maybe_blank = unsafe {
+                slice::from_raw_parts(self.db.map.as_ptr().add(self.offset), BLANK.len())
+            };
+            if maybe_blank == BLANK {
+                self.offset += 8;
+                DbIter::next(self)
+            } else {
+                let r = self.db.record_at(self.offset).unwrap();
+                self.offset += r.len;
+                Some(r)
+            }
+        } else {
+            None
         }
     }
 }
